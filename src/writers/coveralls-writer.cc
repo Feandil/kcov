@@ -107,7 +107,7 @@ private:
 };
 
 static CurlConnectionHandler *g_curl;
-
+const std::string rust_tests_start = "mod tests {";
 
 class CoverallsWriter : public WriterBase
 {
@@ -165,6 +165,7 @@ public:
 				++it) {
 			File *file = it->second;
 			std::string fileName;
+			bool tests = false;
 
 			// Strip away the common path (unless this is the only file)
 			if (m_commonPath != file->m_name)
@@ -180,7 +181,11 @@ public:
 
 			// And coverage
 			for (unsigned int n = 1; n < file->m_lastLineNr; n++) {
-				if (!m_reporter.lineIsCode(file->m_name, n)) {
+				const std::string &line = file->m_lineMap[n];
+				if (line == rust_tests_start)
+					tests = true;
+
+				if (tests || !m_reporter.lineIsCode(file->m_name, n)) {
 					out << "null";
 				} else {
 					IReporter::LineExecutionCount cnt =
