@@ -23,6 +23,7 @@
 #include <link.h>
 
 #include <filter.hh>
+#include <libgen.h>
 
 #include "address-verifier.hh"
 
@@ -110,6 +111,7 @@ public:
 		m_filename = filename;
 
 		m_buildId.clear();
+		m_debuglink.clear();
 
 		m_curSegments.clear();
 		m_executableSegments.clear();
@@ -304,28 +306,41 @@ out_open:
 		dbg = dwarf_begin(fd, DWARF_C_READ);
 
 		if (!dbg && m_buildId.length() > 0) {
-			/* Look for separate debug info */
+			/* Look for separate debug info: build-ids */
+			int debug_fd;
 			std::string debug_file = std::string("/usr/lib/debug/.build-id/" +
 							     m_buildId.substr(0,2) +
 							     "/" +
 							     m_buildId.substr(2, std::string::npos) +
 							     ".debug");
 
-			close(fd);
-			fd = ::open(debug_file.c_str(), O_RDONLY, 0);
-			if (fd < 0) {
-				// Some shared libraries have neither symbols nor build-id files
-				if (m_isMainFile) {
+			debug_fd = ::open(debug_file.c_str(), O_RDONLY, 0);
+			if (debug_fd < 0) {
+				if (m_isMainFile)
 					warning("Cannot open %s", debug_file.c_str());
-					warning("kcov requires binaries built with -g/-ggdb or a build-id file.");
-				}
-				return false;
+			} else {
+				close(fd);
+				fd = debug_fd;
+				dbg = dwarf_begin(fd, DWARF_C_READ);
 			}
+		}
 
-			dbg = dwarf_begin(fd, DWARF_C_READ);
+		if (!dbg && m_debuglink.length() > 0) {
+			/* Look for separate debug info: debug-links */
+			int debug_fd = open_debuglink_file();
+			if (debug_fd < 0) {
+				if (m_isMainFile)
+					warning("Cannot open debug-link file in standard locations");
+			} else {
+				close(fd);
+				fd = debug_fd;
+				dbg = dwarf_begin(fd, DWARF_C_READ);
+			}
 		}
 
 		if (!dbg) {
+			if (m_isMainFile)
+					warning("kcov requires binaries built with -g/-ggdb or a build-id file.");
 			kcov_debug(ELF_MSG, "No debug symbols in %s.\n", m_filename.c_str());
 			close(fd);
 			return false;
@@ -573,6 +588,10 @@ out_err:
 				}
 			}
 
+			// Check for debug links
+			if (strcmp(name, ".gnu_debuglink") == 0)
+				m_debuglink.append((const char *)data->d_buf);
+
 			if ((sh_flags & (SHF_EXECINSTR | SHF_ALLOC)) != (SHF_EXECINSTR | SHF_ALLOC))
 				continue;
 
@@ -660,6 +679,45 @@ private:
 		return addr;
 	}
 
+	int open_debuglink_file()
+	{
+		int debug_fd;
+		std::string debug_file, file_path;
+		char * filename_copy, *real_path;
+
+		filename_copy = ::strdup(m_filename.c_str());
+		file_path = std::string(::dirname(filename_copy));
+		file_path.push_back('/');
+
+		debug_file = std::string(file_path + m_debuglink);
+		debug_fd = ::open(debug_file.c_str(), O_RDONLY, 0);
+		if (debug_fd >= 0) {
+			::free(filename_copy);
+			return debug_fd;
+		}
+
+		debug_file = std::string(file_path + ".debug/" + m_debuglink);
+		debug_fd = ::open(debug_file.c_str(), O_RDONLY, 0);
+		if (debug_fd >= 0) {
+			::free(filename_copy);
+			return debug_fd;
+		}
+
+		real_path = ::realpath(file_path.c_str(), NULL);
+		if (real_path == NULL) {
+			::free(filename_copy);
+			return -1;
+		}
+		debug_file = "/usr/lib/debug";
+		debug_file.append(real_path);
+		debug_file.push_back('/');
+		debug_file.append(m_debuglink);
+		debug_fd = ::open(debug_file.c_str(), O_RDONLY, 0);
+		::free(filename_copy);
+		::free(real_path);
+		return debug_fd;
+	}
+
 	SegmentList_t m_curSegments;
 	SegmentList_t m_executableSegments;
 	FileList_t m_gcnoFiles;
@@ -673,6 +731,7 @@ private:
 	FileListenerList_t m_fileListeners;
 	std::string m_filename;
 	std::string m_buildId;
+	std::string m_debuglink;
 	bool m_isMainFile;
 	uint64_t m_checksum;
 	bool m_initialized;
